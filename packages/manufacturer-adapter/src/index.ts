@@ -33,12 +33,24 @@ export type LookupResult =
   | { found: true; manufacturerRef: string }
   | { found: false }
 
+/** A parcel the manufacturer dispatched on its own courier account. */
+export type Parcel = { carrierCode: string; trackingNumber: string | null }
+
 export interface ManufacturerAdapter {
   /** Submit (or resubmit) a works order. Must be safe to retry with the same key. */
   submitWorksOrder(input: SubmitWorksOrderInput): Promise<SubmitResult>
   /** Ambiguous-timeout recovery: has a works order for this key already landed? */
   lookupWorksOrder(idempotencyKey: string): Promise<LookupResult>
+  /** Parcels the manufacturer created + dispatched (carrier + existing tracking no.). */
+  getDispatch(idempotencyKey: string): Promise<{ parcels: Parcel[] }>
 }
+
+/** Dispatch scenarios the fake manufacturer can be driven through (test fixtures). */
+export type DispatchScenario =
+  | 'dispatch_one_parcel'
+  | 'dispatch_two_parcels'
+  | 'dispatch_unknown_carrier_code'
+  | 'dispatch_missing_tracking_number'
 
 /** Deterministic scenarios the fake adapter can be driven through (test fixtures). */
 export type FakeScenario =
@@ -53,10 +65,36 @@ export class FakeManufacturerAdapter implements ManufacturerAdapter {
   // Works orders the manufacturer has actually created (even if the caller saw a timeout).
   private landed = new Map<string, string>()
 
-  constructor(private scenario: FakeScenario = 'accept_immediately') {}
+  constructor(
+    private scenario: FakeScenario = 'accept_immediately',
+    private dispatchScenario: DispatchScenario = 'dispatch_one_parcel',
+  ) {}
 
   setScenario(scenario: FakeScenario) {
     this.scenario = scenario
+  }
+
+  setDispatchScenario(scenario: DispatchScenario) {
+    this.dispatchScenario = scenario
+  }
+
+  async getDispatch(idempotencyKey: string): Promise<{ parcels: Parcel[] }> {
+    const suffix = idempotencyKey.slice(-6).toUpperCase()
+    switch (this.dispatchScenario) {
+      case 'dispatch_one_parcel':
+        return { parcels: [{ carrierCode: 'ROYAL_MAIL', trackingNumber: `RM${suffix}` }] }
+      case 'dispatch_two_parcels':
+        return {
+          parcels: [
+            { carrierCode: 'ROYAL_MAIL', trackingNumber: `RM${suffix}A` },
+            { carrierCode: 'DPD', trackingNumber: `DPD${suffix}B` },
+          ],
+        }
+      case 'dispatch_unknown_carrier_code':
+        return { parcels: [{ carrierCode: 'ZZZ_UNKNOWN', trackingNumber: `ZZ${suffix}` }] }
+      case 'dispatch_missing_tracking_number':
+        return { parcels: [{ carrierCode: 'ROYAL_MAIL', trackingNumber: null }] }
+    }
   }
 
   async submitWorksOrder(input: SubmitWorksOrderInput): Promise<SubmitResult> {

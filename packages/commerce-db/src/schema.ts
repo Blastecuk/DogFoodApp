@@ -153,6 +153,53 @@ export const manufacturerWorksOrders = commerce.table('manufacturer_works_orders
 })
 
 /**
+ * Shipments (parcels). The manufacturer books the courier and returns the carrier
+ * + tracking number; we register that existing number with the tracking provider
+ * and persist normalised status. iii.dev never buys postage or creates a label.
+ */
+export const shipments = commerce.table(
+  'shipments',
+  {
+    id: text('id').primaryKey(),
+    orderId: text('order_id')
+      .notNull()
+      .references(() => orders.id, { onDelete: 'cascade' }),
+    carrierCode: text('carrier_code').notNull(),
+    trackingNumber: text('tracking_number').notNull(),
+    status: text('status').notNull().default('registered'),
+    lastEventAt: timestamp('last_event_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('shipments_carrier_tracking_uq').on(t.carrierCode, t.trackingNumber)],
+)
+
+/** Normalised, deduplicated tracking events (source: fake tracker / AfterShip). */
+export const trackingEvents = commerce.table(
+  'tracking_events',
+  {
+    id: text('id').primaryKey(),
+    shipmentId: text('shipment_id')
+      .notNull()
+      .references(() => shipments.id, { onDelete: 'cascade' }),
+    providerEventId: text('provider_event_id').notNull(),
+    status: text('status').notNull(),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('tracking_events_shipment_provider_uq').on(t.shipmentId, t.providerEventId)],
+)
+
+/** Operational cases (CRM). Opened for manufacturer/courier exceptions. */
+export const operationalCases = commerce.table('operational_cases', {
+  id: text('id').primaryKey(),
+  orderId: text('order_id').references(() => orders.id, { onDelete: 'set null' }),
+  kind: text('kind').notNull(),
+  detail: text('detail'),
+  status: text('status').notNull().default('open'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+/**
  * Provider webhook dedupe log. A webhook is only processed once; the primary key
  * is the provider event id, so a replayed/duplicated webhook is a no-op.
  */
@@ -190,6 +237,9 @@ export const schema = {
   promotions,
   promotionRedemptions,
   manufacturerWorksOrders,
+  shipments,
+  trackingEvents,
+  operationalCases,
   webhookEvents,
   outboxEvents,
 }

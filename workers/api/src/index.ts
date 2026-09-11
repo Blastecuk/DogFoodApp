@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server'
 import { and, eq, inArray } from 'drizzle-orm'
 import { Hono } from 'hono'
 import Stripe from 'stripe'
+import { FakeTrackingAdapter, STATUS_RANK, type TrackingStatus } from '@dogfood/tracking-adapter'
 import { db, pool, schema } from '@dogfood/commerce-db'
 import { sql } from 'drizzle-orm'
 import { CatalogSyncRequest, CONTRIBUTION_FLOOR_BPS, newId, QuoteRequest, vatFromGross } from '@dogfood/contracts'
@@ -20,6 +21,8 @@ import { SYNC_SIGNATURE_HEADER, verifyBody } from '@dogfood/contracts/signing'
 const app = new Hono()
 const region = process.env.FLY_PRIMARY_REGION ?? 'local'
 
+const tracker = new FakeTrackingAdapter(process.env.TRACKING_WEBHOOK_SECRET ?? 'unset-tracking-secret')
+
 const stripeKey = process.env.STRIPE_SECRET_KEY
 const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET
 // A Stripe instance is needed for webhook signature verification (crypto only —
@@ -34,6 +37,133 @@ app.get('/health', async (c) => {
   } catch {
     return c.json({ status: 'degraded', db: 'down', region, ts: new Date().toISOString() }, 503)
   }
+})
+
+/**
+ * Tracking webhook (fake tracker in prototype; AfterShip in production). Verifies
+ * the signature over the raw body, normalises the status, dedupes by provider
+ * event id per shipment, and advances the shipment status without regressing on
+ * out-of-order events. Duplicate events are a no-op.
+ */
+app.post('/webhooks/tracking/:carrier', async (c) => {
+  const raw = await c.req.text()
+  const sig = c.req.header('aftership-hmac-sha256') ?? c.req.header('x-tracking-signature') ?? ''
+  if (!tracker.verifySignature(raw, sig)) {
+    return c.json({ error: 'invalid_signature' }, 400)
+  }
+
+  let ev
+  try {
+    ev = tracker.normalise(raw)
+  } catch {
+    return c.json({ error: 'invalid_payload' }, 422)
+  }
+
+  const [shipment] = await db
+    .select()
+    .from(schema.shipments)
+    .where(
+      and(
+        eq(schema.shipments.carrierCode, ev.carrierCode),
+        eq(schema.shipments.trackingNumber, ev.trackingNumber),
+      ),
+    )
+    .limit(1)
+  if (!shipment) return c.json({ error: 'shipment_not_found' }, 404)
+
+  const client = await pool.connect()
+  try {
+    const dedupe = await client.query(
+      `INSERT INTO commerce.tracking_events (id, shipment_id, provider_event_id, status, occurred_at)
+       VALUES ($1,$2,$3,$4,$5) ON CONFLICT (shipment_id, provider_event_id) DO NOTHING`,
+      [newId('evt'), shipment.id, ev.providerEventId, ev.status, ev.occurredAt],
+    )
+    if (dedupe.rowCount === 0) {
+      return c.json({ ok: true, deduped: true })
+    }
+
+    // Advance status only if this event is not an out-of-order regression.
+    const currentRank = STATUS_RANK[(shipment.status as TrackingStatus)] ?? 0
+    const incomingRank = STATUS_RANK[ev.status] ?? 0
+    let applied = false
+    if (incomingRank >= currentRank) {
+      await client.query(
+        `UPDATE commerce.shipments SET status=$2, last_event_at=$3 WHERE id=$1`,
+        [shipment.id, ev.status, ev.occurredAt],
+      )
+      applied = true
+    }
+    if (ev.status === 'exception' || ev.status === 'returned') {
+      await client.query(
+        `INSERT INTO commerce.operational_cases (id, order_id, kind, detail, status)
+         VALUES ($1,$2,'tracking_exception',$3,'open')`,
+        [newId('evt'), shipment.orderId, `${ev.carrierCode}:${ev.trackingNumber} ${ev.status}`],
+      )
+    }
+    return c.json({ ok: true, status: ev.status, applied })
+  } finally {
+    client.release()
+  }
+})
+
+/** Customer order list (ownership-scoped; called by the storefront BFF). */
+app.get('/commerce/orders', async (c) => {
+  const customerId = c.req.query('customerId')
+  if (!customerId) return c.json({ error: 'customerId_required' }, 400)
+  const rows = await db
+    .select()
+    .from(schema.orders)
+    .where(eq(schema.orders.customerId, customerId))
+  return c.json({ orders: rows.map((o) => ({
+    id: o.id,
+    status: o.status,
+    paymentStatus: o.paymentStatus,
+    fulfilmentStatus: o.fulfilmentStatus,
+    totalPence: o.totalPence,
+    currency: o.currency,
+    createdAt: o.createdAt,
+  })) })
+})
+
+/** Customer order detail with shipments + tracking (ownership enforced). */
+app.get('/commerce/orders/:id', async (c) => {
+  const customerId = c.req.query('customerId')
+  const id = c.req.param('id')
+  if (!customerId) return c.json({ error: 'customerId_required' }, 400)
+
+  const [order] = await db.select().from(schema.orders).where(eq(schema.orders.id, id)).limit(1)
+  if (!order || order.customerId !== customerId) return c.json({ error: 'not_found' }, 404)
+
+  const items = await db.select().from(schema.orderItems).where(eq(schema.orderItems.orderId, id))
+  const ships = await db.select().from(schema.shipments).where(eq(schema.shipments.orderId, id))
+  const shipmentViews = []
+  for (const s of ships) {
+    const events = await db
+      .select()
+      .from(schema.trackingEvents)
+      .where(eq(schema.trackingEvents.shipmentId, s.id))
+    shipmentViews.push({
+      id: s.id,
+      carrierCode: s.carrierCode,
+      trackingNumber: s.trackingNumber,
+      status: s.status,
+      events: events
+        .map((e) => ({ status: e.status, occurredAt: e.occurredAt }))
+        .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime()),
+    })
+  }
+
+  return c.json({
+    id: order.id,
+    status: order.status,
+    paymentStatus: order.paymentStatus,
+    fulfilmentStatus: order.fulfilmentStatus,
+    totalPence: order.totalPence,
+    currency: order.currency,
+    createdAt: order.createdAt,
+    items: items.map((i) => ({ description: i.description, quantity: i.quantity, unitPricePence: i.unitPricePence })),
+    shipments: shipmentViews,
+  })
 })
 
 /** Accepted catalogue read model — the source of truth for checkout price/VAT. */

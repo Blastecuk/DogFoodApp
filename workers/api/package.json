@@ -12,6 +12,7 @@
   "dependencies": {
     "@dogfood/commerce-db": "workspace:*",
     "@dogfood/contracts": "workspace:*",
+    "@dogfood/tracking-adapter": "workspace:*",
     "@hono/node-server": "^1.13.7",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.6.14",

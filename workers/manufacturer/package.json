@@ -12,7 +12,8 @@
   },
   "dependencies": {
     "@dogfood/commerce-db": "workspace:*",
-    "@dogfood/manufacturer-adapter": "workspace:*"
+    "@dogfood/manufacturer-adapter": "workspace:*",
+    "@dogfood/tracking-adapter": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22",

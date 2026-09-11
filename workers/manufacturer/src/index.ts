@@ -5,6 +5,7 @@ import {
   FakeManufacturerAdapter,
   type ManufacturerAdapter,
 } from '@dogfood/manufacturer-adapter'
+import { APPROVED_CARRIERS, type TrackingAdapter } from '@dogfood/tracking-adapter'
 
 /**
  * Manufacturer consumer (Fly.io `worker` process group).
@@ -126,6 +127,84 @@ export async function processOrder(
   } finally {
     client.release()
   }
+}
+
+export type DispatchResult = {
+  orderId: string
+  registered: number
+  cases: string[]
+  fulfilmentStatus: string
+}
+
+/**
+ * Process manufacturer dispatch for an accepted order: read the parcels the
+ * manufacturer created, register each existing tracking number with the tracking
+ * provider, and persist a shipment. Unknown carrier or missing tracking number
+ * opens an operational case (iii.dev never buys postage or creates a label).
+ */
+export async function dispatchOrder(
+  orderId: string,
+  mfg: ManufacturerAdapter,
+  tracker: TrackingAdapter,
+): Promise<DispatchResult> {
+  const client = await pool.connect()
+  const cases: string[] = []
+  let registered = 0
+  try {
+    const { rows: woRows } = await client.query(
+      `SELECT status FROM commerce.manufacturer_works_orders WHERE order_id=$1`,
+      [orderId],
+    )
+    if (woRows[0]?.status !== 'accepted') {
+      return { orderId, registered: 0, cases: ['works_order_not_accepted'], fulfilmentStatus: 'n/a' }
+    }
+
+    const { parcels } = await mfg.getDispatch(orderId)
+    for (const p of parcels) {
+      if (!APPROVED_CARRIERS.includes(p.carrierCode as (typeof APPROVED_CARRIERS)[number])) {
+        await openCase(client, orderId, 'dispatch_unknown_carrier', `carrier=${p.carrierCode}`)
+        cases.push('dispatch_unknown_carrier')
+        continue
+      }
+      if (!p.trackingNumber) {
+        await openCase(client, orderId, 'dispatch_missing_tracking', `carrier=${p.carrierCode}`)
+        cases.push('dispatch_missing_tracking')
+        continue
+      }
+      const reg = await tracker.register({ carrierCode: p.carrierCode, trackingNumber: p.trackingNumber })
+      if (!reg.registered) {
+        await openCase(client, orderId, 'tracking_registration_failed', `${p.carrierCode}:${p.trackingNumber}`)
+        cases.push('tracking_registration_failed')
+        continue
+      }
+      await client.query(
+        `INSERT INTO commerce.shipments (id, order_id, carrier_code, tracking_number, status)
+         VALUES ($1,$2,$3,$4,'registered')
+         ON CONFLICT (carrier_code, tracking_number) DO NOTHING`,
+        [`shp_${randomUUID().replace(/-/g, '')}`, orderId, p.carrierCode, p.trackingNumber],
+      )
+      registered++
+    }
+
+    const fulfilmentStatus = registered > 0 ? 'dispatched' : 'exception'
+    await client.query(`UPDATE commerce.orders SET fulfilment_status=$2 WHERE id=$1`, [orderId, fulfilmentStatus])
+    return { orderId, registered, cases, fulfilmentStatus }
+  } finally {
+    client.release()
+  }
+}
+
+async function openCase(
+  client: { query: (q: string, p: unknown[]) => Promise<unknown> },
+  orderId: string,
+  kind: string,
+  detail: string,
+) {
+  await client.query(
+    `INSERT INTO commerce.operational_cases (id, order_id, kind, detail, status)
+     VALUES ($1,$2,$3,$4,'open')`,
+    [`case_${randomUUID().replace(/-/g, '')}`, orderId, kind, detail],
+  )
 }
 
 /** Find paid orders that still need a works order and submit them. */
