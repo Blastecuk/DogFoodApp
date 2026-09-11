@@ -6,6 +6,9 @@
         "Fly-Client-Interactive": "false",
         "Fly-Client-Agent": "cursor"
       }
+    },
+    "neon": {
+      "url": "https://mcp.neon.tech/mcp"
     }
   }
 }
