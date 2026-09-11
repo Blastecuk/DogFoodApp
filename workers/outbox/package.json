@@ -1,21 +1,18 @@
 {
-  "name": "api",
+  "name": "outbox",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "iii.dev HTTP API — customer commerce, /ops, provider webhooks. Fly.io process group: api.",
+  "description": "iii.dev outbox publisher — claims committed Neon outbox events and publishes them (Fly.io process group: outbox). Log transport in the prototype; RabbitMQ in production.",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "drain": "tsx src/index.ts --once",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@dogfood/commerce-db": "workspace:*",
-    "@dogfood/contracts": "workspace:*",
-    "@hono/node-server": "^1.13.7",
-    "drizzle-orm": "^0.45.2",
-    "hono": "^4.6.14",
-    "stripe": "^22.6.0"
+    "drizzle-orm": "^0.45.2"
   },
   "devDependencies": {
     "@types/node": "^22",

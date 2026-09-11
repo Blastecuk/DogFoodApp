@@ -27,6 +27,7 @@ export const IdPrefixes = {
   cart: 'cart',
   sku: 'sku',
   quote: 'quote',
+  item: 'item',
   subscription: 'sub',
   shipment: 'shp',
   redemption: 'redemption',

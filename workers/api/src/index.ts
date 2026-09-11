@@ -2,6 +2,7 @@ import 'dotenv/config'
 import { serve } from '@hono/node-server'
 import { and, eq, inArray } from 'drizzle-orm'
 import { Hono } from 'hono'
+import Stripe from 'stripe'
 import { db, pool, schema } from '@dogfood/commerce-db'
 import { sql } from 'drizzle-orm'
 import { CatalogSyncRequest, CONTRIBUTION_FLOOR_BPS, newId, QuoteRequest, vatFromGross } from '@dogfood/contracts'
@@ -18,6 +19,13 @@ import { SYNC_SIGNATURE_HEADER, verifyBody } from '@dogfood/contracts/signing'
  */
 const app = new Hono()
 const region = process.env.FLY_PRIMARY_REGION ?? 'local'
+
+const stripeKey = process.env.STRIPE_SECRET_KEY
+const stripeWebhookSecret = process.env.STRIPE_WEBHOOK_SECRET
+// A Stripe instance is needed for webhook signature verification (crypto only —
+// no API call), so it works even without a real secret key configured.
+const stripe = new Stripe(stripeKey ?? 'sk_test_placeholder')
+const appUrl = process.env.STOREFRONT_URL ?? 'http://localhost:3001'
 
 app.get('/health', async (c) => {
   try {
@@ -49,6 +57,164 @@ app.get('/commerce/catalog/:id', async (c) => {
 })
 
 const QUOTE_TTL_MS = 15 * 60 * 1000
+
+/**
+ * Create a Stripe test Checkout Session from an accepted, unexpired quote. The
+ * quote id travels in the session metadata so the paid webhook can create the
+ * order from the server-priced snapshot. When no Stripe key is configured we
+ * return a simulated session so the prototype flow still works end-to-end.
+ */
+app.post('/commerce/checkout', async (c) => {
+  const { quoteId } = (await c.req.json().catch(() => ({}))) as { quoteId?: string }
+  if (!quoteId) return c.json({ error: 'quoteId_required' }, 400)
+
+  const [quote] = await db
+    .select()
+    .from(schema.pricingQuotes)
+    .where(eq(schema.pricingQuotes.id, quoteId))
+    .limit(1)
+  if (!quote) return c.json({ error: 'quote_not_found' }, 404)
+  if (quote.status !== 'active' || quote.expiresAt.getTime() < Date.now()) {
+    return c.json({ error: 'quote_invalid', status: quote.status }, 409)
+  }
+
+  if (stripeKey) {
+    const session = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      metadata: { quoteId },
+      success_url: `${appUrl}/account?checkout=success`,
+      cancel_url: `${appUrl}/cart?checkout=cancelled`,
+      line_items: [
+        {
+          quantity: 1,
+          price_data: {
+            currency: quote.currency.toLowerCase(),
+            unit_amount: quote.totalPence,
+            product_data: { name: `DogFood order (quote ${quoteId})` },
+          },
+        },
+      ],
+    })
+    return c.json({ sessionId: session.id, url: session.url, simulated: false })
+  }
+
+  // Simulated session (no Stripe key). The webhook test signs an event carrying
+  // this session id + quoteId metadata.
+  const sessionId = `cs_sim_${newId('evt').split('_')[1]}`
+  return c.json({
+    sessionId,
+    url: `${appUrl}/account?checkout=simulated`,
+    simulated: true,
+  })
+})
+
+/**
+ * Stripe webhook. Verifies the raw-body signature, deduplicates by event id, and
+ * on a paid checkout commits the order + order items + outbox event atomically
+ * (transactional outbox), redeems any reserved promotion and consumes the quote.
+ * Duplicate deliveries create no duplicate order.
+ */
+app.post('/webhooks/stripe', async (c) => {
+  if (!stripeWebhookSecret) return c.json({ error: 'webhook_not_configured' }, 500)
+  const raw = await c.req.text()
+  const sig = c.req.header('stripe-signature') ?? ''
+
+  let event: Stripe.Event
+  try {
+    event = stripe.webhooks.constructEvent(raw, sig, stripeWebhookSecret)
+  } catch (err) {
+    return c.json({ error: 'invalid_signature', message: (err as Error).message }, 400)
+  }
+
+  const client = await pool.connect()
+  try {
+    // Dedupe: first writer wins; a replay is a no-op.
+    const dedupe = await client.query(
+      `INSERT INTO commerce.webhook_events (id, provider, event_type)
+       VALUES ($1,'stripe',$2) ON CONFLICT (id) DO NOTHING`,
+      [event.id, event.type],
+    )
+    if (dedupe.rowCount === 0) {
+      return c.json({ ok: true, deduped: true, eventId: event.id })
+    }
+
+    if (event.type !== 'checkout.session.completed') {
+      await client.query(`UPDATE commerce.webhook_events SET processed_at = now() WHERE id=$1`, [event.id])
+      return c.json({ ok: true, ignored: event.type })
+    }
+
+    const session = event.data.object as Stripe.Checkout.Session
+    const quoteId = session.metadata?.quoteId
+    if (!quoteId) return c.json({ error: 'missing_quote_metadata' }, 400)
+
+    const [quote] = await db
+      .select()
+      .from(schema.pricingQuotes)
+      .where(eq(schema.pricingQuotes.id, quoteId))
+      .limit(1)
+    if (!quote) return c.json({ error: 'quote_not_found' }, 404)
+
+    // Idempotency guard: one order per checkout session.
+    const existing = await client.query(
+      `SELECT id FROM commerce.orders WHERE stripe_checkout_session_id = $1 LIMIT 1`,
+      [session.id],
+    )
+    if ((existing.rowCount ?? 0) > 0) {
+      await client.query(`UPDATE commerce.webhook_events SET processed_at = now() WHERE id=$1`, [event.id])
+      return c.json({ ok: true, alreadyProcessed: true, orderId: existing.rows[0].id })
+    }
+
+    const orderId = newId('order')
+    const lineItems = quote.lineItems as Array<{
+      skuId: string
+      productSlug: string
+      variantLabel: string
+      quantity: number
+      unitGrossPence: number
+    }>
+
+    await client.query('BEGIN')
+    await client.query(
+      `INSERT INTO commerce.orders
+         (id, customer_id, status, payment_status, fulfilment_status, total_pence, currency, stripe_checkout_session_id)
+       VALUES ($1,$2,'paid','paid','pending',$3,$4,$5)`,
+      [orderId, quote.customerId, quote.totalPence, quote.currency, session.id],
+    )
+    for (const li of lineItems) {
+      await client.query(
+        `INSERT INTO commerce.order_items (id, order_id, sku_id, description, quantity, unit_price_pence)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [newId('item'), orderId, li.skuId, `${li.productSlug} · ${li.variantLabel}`, li.quantity, li.unitGrossPence],
+      )
+    }
+    // Transactional outbox: the paid-order event is committed in the SAME tx.
+    await client.query(
+      `INSERT INTO commerce.outbox_events (id, event_type, idempotency_key, correlation_id, payload)
+       VALUES ($1,'order.paid',$2,$3,$4)`,
+      [
+        newId('evt'),
+        orderId,
+        session.id,
+        JSON.stringify({ orderId, quoteId, customerId: quote.customerId, totalPence: quote.totalPence }),
+      ],
+    )
+    await client.query(
+      `UPDATE commerce.promotion_redemptions SET status='redeemed'
+       WHERE quote_id=$1 AND status='reserved'`,
+      [quoteId],
+    )
+    await client.query(`UPDATE commerce.pricing_quotes SET status='consumed' WHERE id=$1`, [quoteId])
+    await client.query(`UPDATE commerce.webhook_events SET processed_at = now() WHERE id=$1`, [event.id])
+    await client.query('COMMIT')
+
+    return c.json({ ok: true, orderId })
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    return c.json({ error: 'processing_failed', message: (err as Error).message }, 500)
+  } finally {
+    client.release()
+  }
+})
 
 /**
  * Create a server-priced, expiring quote. The browser supplies only sku + qty;

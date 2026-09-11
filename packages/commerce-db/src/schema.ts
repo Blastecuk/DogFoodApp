@@ -132,6 +132,18 @@ export const promotionRedemptions = commerce.table('promotion_redemptions', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
+/**
+ * Provider webhook dedupe log. A webhook is only processed once; the primary key
+ * is the provider event id, so a replayed/duplicated webhook is a no-op.
+ */
+export const webhookEvents = commerce.table('webhook_events', {
+  id: text('id').primaryKey(), // provider event id (e.g. Stripe evt_...)
+  provider: text('provider').notNull(),
+  eventType: text('event_type').notNull(),
+  receivedAt: timestamp('received_at', { withTimezone: true }).notNull().defaultNow(),
+  processedAt: timestamp('processed_at', { withTimezone: true }),
+})
+
 /** Transactional outbox — paid-order state and event are committed atomically. */
 export const outboxEvents = commerce.table(
   'outbox_events',
@@ -157,6 +169,7 @@ export const schema = {
   pricingQuotes,
   promotions,
   promotionRedemptions,
+  webhookEvents,
   outboxEvents,
 }
 
