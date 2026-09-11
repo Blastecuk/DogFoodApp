@@ -3,7 +3,8 @@ import { serve } from '@hono/node-server'
 import { and, eq } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { db, pool, schema } from '@dogfood/commerce-db'
-import { vatFromGross } from '@dogfood/contracts'
+import { CatalogSyncRequest, newId, vatFromGross } from '@dogfood/contracts'
+import { SYNC_SIGNATURE_HEADER, verifyBody } from '@dogfood/contracts/signing'
 
 /**
  * iii.dev HTTP API (Fly.io `api` process group).
@@ -44,6 +45,98 @@ app.get('/commerce/catalog/:id', async (c) => {
     .limit(1)
   if (!row) return c.json({ error: 'not_found' }, 404)
   return c.json(toSkuView(row))
+})
+
+/**
+ * Private catalogue sync (Payload → iii.dev). Signed with a shared secret over
+ * the raw body; commits approved product/variant pricing into catalog_skus.
+ * Idempotent (upsert on product_slug+variant_label) and reconciling (variants
+ * removed in Payload are deactivated in commerce). iii.dev never reads payload_db.
+ */
+app.post('/internal/catalog/sync', async (c) => {
+  const secret = process.env.PAYLOAD_COMMERCE_SYNC_SECRET
+  const expectedAudience = process.env.III_SYNC_AUDIENCE
+  if (!secret || !expectedAudience) {
+    return c.json({ error: 'sync_not_configured' }, 500)
+  }
+
+  const raw = await c.req.text()
+  const signature = c.req.header(SYNC_SIGNATURE_HEADER) ?? ''
+  if (!verifyBody(secret, raw, signature)) {
+    return c.json({ error: 'invalid_signature' }, 401)
+  }
+
+  const parsed = CatalogSyncRequest.safeParse(JSON.parse(raw))
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_payload', details: parsed.error.flatten() }, 422)
+  }
+  const body = parsed.data
+  if (body.audience !== expectedAudience) {
+    return c.json({ error: 'wrong_audience' }, 403)
+  }
+
+  const bySlug = new Map<string, string[]>()
+  for (const s of body.skus) {
+    const list = bySlug.get(s.productSlug) ?? []
+    list.push(s.variantLabel)
+    bySlug.set(s.productSlug, list)
+  }
+
+  const client = await pool.connect()
+  let upserted = 0
+  let deactivated = 0
+  try {
+    await client.query('BEGIN')
+    for (const s of body.skus) {
+      await client.query(
+        `INSERT INTO commerce.catalog_skus
+           (id, product_slug, variant_label, supplier_sku, price_pence, vat_rate_bps, active, catalog_version)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         ON CONFLICT (product_slug, variant_label) DO UPDATE SET
+           supplier_sku = EXCLUDED.supplier_sku,
+           price_pence = EXCLUDED.price_pence,
+           vat_rate_bps = EXCLUDED.vat_rate_bps,
+           active = EXCLUDED.active,
+           catalog_version = EXCLUDED.catalog_version,
+           updated_at = now()`,
+        [
+          newId('sku'),
+          s.productSlug,
+          s.variantLabel,
+          s.supplierSku ?? null,
+          s.pricePence,
+          s.vatRateBps,
+          s.active,
+          body.catalogVersion,
+        ],
+      )
+      upserted++
+    }
+    // Reconcile: deactivate variants no longer present for each synced product.
+    for (const [slug, labels] of bySlug) {
+      const res = await client.query(
+        `UPDATE commerce.catalog_skus
+           SET active = false, updated_at = now()
+         WHERE product_slug = $1 AND variant_label <> ALL($2::text[]) AND active = true`,
+        [slug, labels],
+      )
+      deactivated += res.rowCount ?? 0
+    }
+    await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK')
+    return c.json({ error: 'sync_failed', message: (err as Error).message }, 500)
+  } finally {
+    client.release()
+  }
+
+  return c.json({
+    ok: true,
+    received: body.skus.length,
+    upserted,
+    deactivated,
+    productSlugs: [...bySlug.keys()],
+  })
 })
 
 function toSkuView(row: typeof schema.catalogSkus.$inferSelect) {

@@ -201,6 +201,21 @@ export interface Product {
   lifeStage?: ('puppy' | 'adult' | 'senior' | 'all') | null;
   ingredients?: string | null;
   suitability?: string[] | null;
+  /**
+   * Purchasable variants. Retail price is a proposal; it becomes checkout-authoritative only after publish syncs it to commerce catalog_skus.
+   */
+  variants?:
+    | {
+        variantLabel: string;
+        supplierSku?: string | null;
+        /**
+         * Gross retail price in pence (inc VAT).
+         */
+        retailPricePence: number;
+        active?: boolean | null;
+        id?: string | null;
+      }[]
+    | null;
   image?: (number | null) | Media;
   seo?: {
     title?: string | null;
@@ -415,6 +430,15 @@ export interface ProductsSelect<T extends boolean = true> {
   lifeStage?: T;
   ingredients?: T;
   suitability?: T;
+  variants?:
+    | T
+    | {
+        variantLabel?: T;
+        supplierSku?: T;
+        retailPricePence?: T;
+        active?: T;
+        id?: T;
+      };
   image?: T;
   seo?:
     | T

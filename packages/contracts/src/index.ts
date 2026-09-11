@@ -53,6 +53,31 @@ export type EventEnvelope = z.infer<typeof EventEnvelope>
 export const Role = z.enum(['superadmin', 'admin', 'user'])
 export type Role = z.infer<typeof Role>
 
+/**
+ * Catalogue sync contract — Payload pushes approved product/variant pricing to
+ * iii.dev's signed private endpoint, which commits it to the commerce
+ * `catalog_skus` read model. iii.dev NEVER reads payload_db; Payload NEVER writes
+ * commerce tables directly. Requests are HMAC-signed with a shared secret over the
+ * raw body, hex(sha256), and carry an audience the receiver checks.
+ */
+export const CatalogSyncSku = z.object({
+  productSlug: z.string().min(1),
+  variantLabel: z.string().min(1),
+  supplierSku: z.string().nullish(),
+  pricePence: Pence,
+  vatRateBps: z.number().int().min(0).max(10000).default(2000),
+  active: z.boolean().default(true),
+})
+export type CatalogSyncSku = z.infer<typeof CatalogSyncSku>
+
+export const CatalogSyncRequest = z.object({
+  source: z.string().default('payload'),
+  audience: z.string(),
+  catalogVersion: z.number().int().positive().default(1),
+  skus: z.array(CatalogSyncSku).min(1),
+})
+export type CatalogSyncRequest = z.infer<typeof CatalogSyncRequest>
+
 /** Short-lived BFF token claims (issuer/audience/subject/role/expiry/correlation). */
 export const BffTokenClaims = z.object({
   iss: z.string(),
