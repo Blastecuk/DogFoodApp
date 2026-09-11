@@ -25,9 +25,24 @@ type Quote = {
   lineItems: QuoteLine[]
   subtotalPence: number
   vatPence: number
+  grossTotalPence: number
+  discountPence: number
+  discount: { code: string; amountPence: number } | null
+  discountError: string | null
   totalPence: number
   status: string
   expiresAt: string
+}
+
+const DISCOUNT_ERRORS: Record<string, string> = {
+  not_found: 'Code not recognised',
+  inactive: 'Code is not active',
+  not_started: 'Code is not active yet',
+  expired: 'Code has expired',
+  exhausted: 'Code has been fully redeemed',
+  first_order_only: 'Code is for first orders only (sign in required)',
+  not_first_order: 'Code is valid on first orders only',
+  margin_floor: 'Code cannot be applied to this order',
 }
 
 const gbp = (pence: number) => `£${(pence / 100).toFixed(2)}`
@@ -36,6 +51,7 @@ export function CartClient() {
   const [skus, setSkus] = useState<Sku[]>([])
   const [qty, setQty] = useState<Record<string, number>>({})
   const [quote, setQuote] = useState<Quote | null>(null)
+  const [discountCode, setDiscountCode] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
@@ -61,7 +77,7 @@ export function CartClient() {
     const res = await fetch('/api/commerce/quote', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ items }),
+      body: JSON.stringify({ items, discountCode: discountCode.trim() || undefined }),
     })
     const data = await res.json()
     setLoading(false)
@@ -102,13 +118,23 @@ export function CartClient() {
             <li className="py-3 text-sm text-slate-500">Loading catalogue…</li>
           )}
         </ul>
-        <button
-          onClick={getQuote}
-          disabled={loading}
-          className="mt-4 rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-60"
-        >
-          {loading ? 'Pricing…' : 'Get quote'}
-        </button>
+        <div className="mt-4 flex items-center gap-3">
+          <input
+            type="text"
+            placeholder="Discount code (optional)"
+            value={discountCode}
+            aria-label="Discount code"
+            onChange={(e) => setDiscountCode(e.target.value.toUpperCase())}
+            className="w-56 rounded-lg border border-slate-300 px-3 py-2 text-sm uppercase"
+          />
+          <button
+            onClick={getQuote}
+            disabled={loading}
+            className="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-60"
+          >
+            {loading ? 'Pricing…' : 'Get quote'}
+          </button>
+        </div>
         {error && (
           <p role="alert" className="mt-3 text-sm text-red-600">
             {error}
@@ -143,11 +169,22 @@ export function CartClient() {
               <dt className="text-slate-500">VAT</dt>
               <dd>{gbp(quote.vatPence)}</dd>
             </div>
+            {quote.discount && (
+              <div className="flex justify-between text-emerald-700">
+                <dt>Discount ({quote.discount.code})</dt>
+                <dd>−{gbp(quote.discountPence)}</dd>
+              </div>
+            )}
             <div className="flex justify-between font-semibold">
               <dt>Total</dt>
               <dd>{gbp(quote.totalPence)}</dd>
             </div>
           </dl>
+          {quote.discountError && (
+            <p className="mt-2 text-sm text-amber-700">
+              Discount not applied: {DISCOUNT_ERRORS[quote.discountError] ?? quote.discountError}
+            </p>
+          )}
           <p className="mt-3 text-xs text-slate-400">
             Quote {quote.id} · expires {new Date(quote.expiresAt).toLocaleTimeString()}
           </p>

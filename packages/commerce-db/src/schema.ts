@@ -93,9 +93,42 @@ export const pricingQuotes = commerce.table('pricing_quotes', {
   lineItems: jsonb('line_items').notNull(),
   subtotalPence: integer('subtotal_pence').notNull(),
   vatPence: integer('vat_pence').notNull(),
+  discountPence: integer('discount_pence').notNull().default(0),
+  promotionCode: text('promotion_code'),
   totalPence: integer('total_pence').notNull(),
   status: text('status').notNull().default('active'),
   expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+/**
+ * Activated, checkout-authoritative discount codes (Neon owns these; Payload
+ * only holds editable promotion proposals). Redemptions/reservations are tracked
+ * separately so a code cannot be over-used.
+ */
+export const promotions = commerce.table('promotions', {
+  id: text('id').primaryKey(),
+  code: text('code').notNull().unique(),
+  kind: text('kind').notNull().default('fixed'), // 'fixed' | 'percentage'
+  value: integer('value').notNull(), // fixed: pence off; percentage: percent 0-100
+  firstOrderOnly: boolean('first_order_only').notNull().default(false),
+  active: boolean('active').notNull().default(true),
+  maxRedemptions: integer('max_redemptions'),
+  startsAt: timestamp('starts_at', { withTimezone: true }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const promotionRedemptions = commerce.table('promotion_redemptions', {
+  id: text('id').primaryKey(),
+  promotionId: text('promotion_id')
+    .notNull()
+    .references(() => promotions.id, { onDelete: 'cascade' }),
+  quoteId: text('quote_id'),
+  customerId: text('customer_id'),
+  amountPence: integer('amount_pence').notNull(),
+  status: text('status').notNull().default('reserved'), // 'reserved' | 'redeemed' | 'released'
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 })
 
@@ -122,6 +155,8 @@ export const schema = {
   orders,
   orderItems,
   pricingQuotes,
+  promotions,
+  promotionRedemptions,
   outboxEvents,
 }
 

@@ -12,6 +12,7 @@
     "migrate": "drizzle-kit migrate",
     "grant-runtime": "tsx src/grant-runtime.ts",
     "seed": "tsx src/seed.ts",
+    "seed:promotions": "tsx src/seed-promotions.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

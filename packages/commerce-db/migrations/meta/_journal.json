@@ -15,6 +15,13 @@
       "when": 1789133523283,
       "tag": "0001_lovely_famine",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789134708570,
+      "tag": "0002_public_the_anarchist",
+      "breakpoints": true
     }
   ]
 }

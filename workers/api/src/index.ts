@@ -3,7 +3,8 @@ import { serve } from '@hono/node-server'
 import { and, eq, inArray } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { db, pool, schema } from '@dogfood/commerce-db'
-import { CatalogSyncRequest, newId, QuoteRequest, vatFromGross } from '@dogfood/contracts'
+import { sql } from 'drizzle-orm'
+import { CatalogSyncRequest, CONTRIBUTION_FLOOR_BPS, newId, QuoteRequest, vatFromGross } from '@dogfood/contracts'
 import { SYNC_SIGNATURE_HEADER, verifyBody } from '@dogfood/contracts/signing'
 
 /**
@@ -58,7 +59,7 @@ app.post('/commerce/quotes', async (c) => {
   if (!parsed.success) {
     return c.json({ error: 'invalid_request', details: parsed.error.flatten() }, 422)
   }
-  const { items, customerId } = parsed.data
+  const { items, customerId, discountCode } = parsed.data
 
   const skuIds = [...new Set(items.map((i) => i.skuId))]
   const rows = await db
@@ -98,6 +99,32 @@ app.post('/commerce/quotes', async (c) => {
 
   const id = newId('quote')
   const expiresAt = new Date(Date.now() + QUOTE_TTL_MS)
+
+  // Discount validation + reservation (iii.dev owns this; browser sends only a code).
+  let discountPence = 0
+  let appliedCode: string | null = null
+  let discount: { code: string; amountPence: number } | null = null
+  let discountError: string | null = null
+  let reservation: { promotionId: string; amountPence: number } | null = null
+
+  if (discountCode) {
+    const outcome = await evaluateDiscount({
+      code: discountCode,
+      grossTotal: totalPence,
+      customerId: customerId ?? null,
+    })
+    if (outcome.ok) {
+      discountPence = outcome.amountPence
+      appliedCode = outcome.code
+      discount = { code: outcome.code, amountPence: outcome.amountPence }
+      reservation = { promotionId: outcome.promotionId, amountPence: outcome.amountPence }
+    } else {
+      discountError = outcome.reason // fail safely — quote still returned at full price
+    }
+  }
+
+  const payablePence = totalPence - discountPence
+
   await db.insert(schema.pricingQuotes).values({
     id,
     customerId: customerId ?? null,
@@ -106,16 +133,107 @@ app.post('/commerce/quotes', async (c) => {
     lineItems,
     subtotalPence,
     vatPence,
-    totalPence,
+    discountPence,
+    promotionCode: appliedCode,
+    totalPence: payablePence,
     status: 'active',
     expiresAt,
   })
 
+  if (reservation) {
+    await db.insert(schema.promotionRedemptions).values({
+      id: newId('redemption'),
+      promotionId: reservation.promotionId,
+      quoteId: id,
+      customerId: customerId ?? null,
+      amountPence: reservation.amountPence,
+      status: 'reserved',
+      expiresAt,
+    })
+  }
+
   return c.json(
-    { id, currency: 'GBP', lineItems, subtotalPence, vatPence, totalPence, status: 'active', expiresAt: expiresAt.toISOString() },
+    {
+      id,
+      currency: 'GBP',
+      lineItems,
+      subtotalPence,
+      vatPence,
+      grossTotalPence: totalPence,
+      discountPence,
+      discount,
+      discountError,
+      totalPence: payablePence,
+      status: 'active',
+      expiresAt: expiresAt.toISOString(),
+    },
     201,
   )
 })
+
+type DiscountOutcome =
+  | { ok: true; code: string; promotionId: string; amountPence: number }
+  | { ok: false; reason: string }
+
+/**
+ * Validate a discount code against the authoritative commerce promotion, enforce
+ * the contribution floor, and confirm it isn't expired/exhausted/first-order-only.
+ * Returns a safe failure reason instead of throwing.
+ */
+async function evaluateDiscount(args: {
+  code: string
+  grossTotal: number
+  customerId: string | null
+}): Promise<DiscountOutcome> {
+  const [promo] = await db
+    .select()
+    .from(schema.promotions)
+    .where(eq(schema.promotions.code, args.code))
+    .limit(1)
+
+  if (!promo) return { ok: false, reason: 'not_found' }
+  if (!promo.active) return { ok: false, reason: 'inactive' }
+  const now = Date.now()
+  if (promo.startsAt && promo.startsAt.getTime() > now) return { ok: false, reason: 'not_started' }
+  if (promo.expiresAt && promo.expiresAt.getTime() < now) return { ok: false, reason: 'expired' }
+
+  // Exhaustion: count live reservations + redemptions against the cap.
+  if (promo.maxRedemptions != null) {
+    const [{ n }] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(schema.promotionRedemptions)
+      .where(
+        sql`${schema.promotionRedemptions.promotionId} = ${promo.id}
+            AND ${schema.promotionRedemptions.status} IN ('reserved','redeemed')
+            AND (${schema.promotionRedemptions.expiresAt} IS NULL OR ${schema.promotionRedemptions.expiresAt} > now())`,
+      )
+    if (n >= promo.maxRedemptions) return { ok: false, reason: 'exhausted' }
+  }
+
+  // First-order-only: requires a known customer with zero prior orders.
+  if (promo.firstOrderOnly) {
+    if (!args.customerId) return { ok: false, reason: 'first_order_only' }
+    const [{ n }] = await db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(schema.orders)
+      .where(eq(schema.orders.customerId, args.customerId))
+    if (n > 0) return { ok: false, reason: 'not_first_order' }
+  }
+
+  const raw =
+    promo.kind === 'percentage'
+      ? Math.round((args.grossTotal * promo.value) / 100)
+      : promo.value
+  const amountPence = Math.max(0, Math.min(raw, args.grossTotal))
+
+  // Contribution floor: payable total must not drop below the configured share.
+  const floor = Math.round((args.grossTotal * CONTRIBUTION_FLOOR_BPS) / 10000)
+  if (args.grossTotal - amountPence < floor) {
+    return { ok: false, reason: 'margin_floor' }
+  }
+
+  return { ok: true, code: promo.code, promotionId: promo.id, amountPence }
+}
 
 /** Fetch a quote; lazily marks it expired once past its TTL. */
 app.get('/commerce/quotes/:id', async (c) => {

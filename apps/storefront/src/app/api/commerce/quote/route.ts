@@ -34,12 +34,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'empty_cart' }, { status: 400 })
   }
 
+  const discountCode =
+    typeof body?.discountCode === 'string' && body.discountCode.trim()
+      ? body.discountCode.trim()
+      : undefined
+
   try {
     const res = await fetch(`${III}/commerce/quotes`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       // customerId is derived from the session, not accepted from the client.
-      body: JSON.stringify({ items, customerId: session.user.id }),
+      body: JSON.stringify({ items, customerId: session.user.id, discountCode }),
     })
     const data = await res.json()
     return NextResponse.json(data, { status: res.status })

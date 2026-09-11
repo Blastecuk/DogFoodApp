@@ -29,6 +29,7 @@ export const IdPrefixes = {
   quote: 'quote',
   subscription: 'sub',
   shipment: 'shp',
+  redemption: 'redemption',
   event: 'evt',
 } as const
 
@@ -92,8 +93,16 @@ export type QuoteItem = z.infer<typeof QuoteItem>
 export const QuoteRequest = z.object({
   items: z.array(QuoteItem).min(1),
   customerId: z.string().nullish(),
+  discountCode: z.string().trim().min(1).max(64).optional(),
 })
 export type QuoteRequest = z.infer<typeof QuoteRequest>
+
+/**
+ * Minimum share of the gross order value that must remain after a discount
+ * (a prototype stand-in for the real supplier-cost-based contribution floor).
+ * A discount that would push the payable total below this is rejected.
+ */
+export const CONTRIBUTION_FLOOR_BPS = 5000
 
 /** Short-lived BFF token claims (issuer/audience/subject/role/expiry/correlation). */
 export const BffTokenClaims = z.object({
