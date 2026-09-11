@@ -34,7 +34,7 @@ export const IdPrefixes = {
 export type IdPrefix = (typeof IdPrefixes)[keyof typeof IdPrefixes]
 
 export function newId(prefix: IdPrefix): string {
-  return `${prefix}_${crypto.randomUUID().replace(/-/g, '')}`
+  return `${prefix}_${globalThis.crypto.randomUUID().replace(/-/g, '')}`
 }
 
 /** Canonical event envelope carried through outbox → RabbitMQ → inbox. */
