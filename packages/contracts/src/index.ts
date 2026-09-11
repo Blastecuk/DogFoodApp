@@ -26,6 +26,7 @@ export const IdPrefixes = {
   order: 'order',
   cart: 'cart',
   sku: 'sku',
+  quote: 'quote',
   subscription: 'sub',
   shipment: 'shp',
   event: 'evt',
@@ -77,6 +78,22 @@ export const CatalogSyncRequest = z.object({
   skus: z.array(CatalogSyncSku).min(1),
 })
 export type CatalogSyncRequest = z.infer<typeof CatalogSyncRequest>
+
+/**
+ * Checkout quote request. The browser may specify ONLY sku + quantity — never
+ * prices. iii.dev prices the quote authoritatively from catalog_skus.
+ */
+export const QuoteItem = z.object({
+  skuId: z.string().min(1),
+  quantity: z.number().int().min(1).max(999),
+})
+export type QuoteItem = z.infer<typeof QuoteItem>
+
+export const QuoteRequest = z.object({
+  items: z.array(QuoteItem).min(1),
+  customerId: z.string().nullish(),
+})
+export type QuoteRequest = z.infer<typeof QuoteRequest>
 
 /** Short-lived BFF token claims (issuer/audience/subject/role/expiry/correlation). */
 export const BffTokenClaims = z.object({

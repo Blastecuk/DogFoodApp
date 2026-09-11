@@ -80,6 +80,25 @@ export const orderItems = commerce.table('order_items', {
   unitPricePence: integer('unit_price_pence').notNull(),
 })
 
+/**
+ * Server-priced, expiring checkout quotes. Prices are copied from catalog_skus
+ * at quote time (never trusted from the browser). A quote is only valid until
+ * expiresAt and must be revalidated before payment.
+ */
+export const pricingQuotes = commerce.table('pricing_quotes', {
+  id: text('id').primaryKey(),
+  customerId: text('customer_id'),
+  currency: text('currency').notNull().default('GBP'),
+  catalogVersion: integer('catalog_version').notNull().default(1),
+  lineItems: jsonb('line_items').notNull(),
+  subtotalPence: integer('subtotal_pence').notNull(),
+  vatPence: integer('vat_pence').notNull(),
+  totalPence: integer('total_pence').notNull(),
+  status: text('status').notNull().default('active'),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
 /** Transactional outbox — paid-order state and event are committed atomically. */
 export const outboxEvents = commerce.table(
   'outbox_events',
@@ -102,6 +121,7 @@ export const schema = {
   cartItems,
   orders,
   orderItems,
+  pricingQuotes,
   outboxEvents,
 }
 

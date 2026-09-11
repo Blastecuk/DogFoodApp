@@ -20,6 +20,12 @@ export default async function AccountPage() {
           same-origin BFF routes to the iii.dev commerce API (never by trusting
           the browser).
         </p>
+        <a
+          href="/cart"
+          className="mt-4 inline-block rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500"
+        >
+          Build an order →
+        </a>
       </div>
     </main>
   )

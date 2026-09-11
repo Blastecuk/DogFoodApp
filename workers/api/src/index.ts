@@ -1,9 +1,9 @@
 import 'dotenv/config'
 import { serve } from '@hono/node-server'
-import { and, eq } from 'drizzle-orm'
+import { and, eq, inArray } from 'drizzle-orm'
 import { Hono } from 'hono'
 import { db, pool, schema } from '@dogfood/commerce-db'
-import { CatalogSyncRequest, newId, vatFromGross } from '@dogfood/contracts'
+import { CatalogSyncRequest, newId, QuoteRequest, vatFromGross } from '@dogfood/contracts'
 import { SYNC_SIGNATURE_HEADER, verifyBody } from '@dogfood/contracts/signing'
 
 /**
@@ -45,6 +45,107 @@ app.get('/commerce/catalog/:id', async (c) => {
     .limit(1)
   if (!row) return c.json({ error: 'not_found' }, 404)
   return c.json(toSkuView(row))
+})
+
+const QUOTE_TTL_MS = 15 * 60 * 1000
+
+/**
+ * Create a server-priced, expiring quote. The browser supplies only sku + qty;
+ * every price/VAT is taken from catalog_skus here (never trusted from input).
+ */
+app.post('/commerce/quotes', async (c) => {
+  const parsed = QuoteRequest.safeParse(await c.req.json().catch(() => null))
+  if (!parsed.success) {
+    return c.json({ error: 'invalid_request', details: parsed.error.flatten() }, 422)
+  }
+  const { items, customerId } = parsed.data
+
+  const skuIds = [...new Set(items.map((i) => i.skuId))]
+  const rows = await db
+    .select()
+    .from(schema.catalogSkus)
+    .where(and(inArray(schema.catalogSkus.id, skuIds), eq(schema.catalogSkus.active, true)))
+
+  const bySku = new Map(rows.map((r) => [r.id, r]))
+  const missing = skuIds.filter((id) => !bySku.has(id))
+  if (missing.length > 0) {
+    return c.json({ error: 'unavailable_skus', skuIds: missing }, 422)
+  }
+
+  let subtotalPence = 0
+  let vatPence = 0
+  let totalPence = 0
+  let catalogVersion = 1
+  const lineItems = items.map((i) => {
+    const sku = bySku.get(i.skuId)!
+    const rate = sku.vatRateBps / 10000
+    const lineGross = sku.pricePence * i.quantity
+    const lineVat = vatFromGross(lineGross, rate)
+    totalPence += lineGross
+    vatPence += lineVat
+    subtotalPence += lineGross - lineVat
+    catalogVersion = Math.max(catalogVersion, sku.catalogVersion)
+    return {
+      skuId: sku.id,
+      productSlug: sku.productSlug,
+      variantLabel: sku.variantLabel,
+      quantity: i.quantity,
+      unitGrossPence: sku.pricePence,
+      lineGrossPence: lineGross,
+      lineVatPence: lineVat,
+    }
+  })
+
+  const id = newId('quote')
+  const expiresAt = new Date(Date.now() + QUOTE_TTL_MS)
+  await db.insert(schema.pricingQuotes).values({
+    id,
+    customerId: customerId ?? null,
+    currency: 'GBP',
+    catalogVersion,
+    lineItems,
+    subtotalPence,
+    vatPence,
+    totalPence,
+    status: 'active',
+    expiresAt,
+  })
+
+  return c.json(
+    { id, currency: 'GBP', lineItems, subtotalPence, vatPence, totalPence, status: 'active', expiresAt: expiresAt.toISOString() },
+    201,
+  )
+})
+
+/** Fetch a quote; lazily marks it expired once past its TTL. */
+app.get('/commerce/quotes/:id', async (c) => {
+  const id = c.req.param('id')
+  const [row] = await db
+    .select()
+    .from(schema.pricingQuotes)
+    .where(eq(schema.pricingQuotes.id, id))
+    .limit(1)
+  if (!row) return c.json({ error: 'not_found' }, 404)
+
+  let status = row.status
+  if (status === 'active' && row.expiresAt.getTime() < Date.now()) {
+    status = 'expired'
+    await db
+      .update(schema.pricingQuotes)
+      .set({ status })
+      .where(eq(schema.pricingQuotes.id, id))
+  }
+
+  return c.json({
+    id: row.id,
+    currency: row.currency,
+    lineItems: row.lineItems,
+    subtotalPence: row.subtotalPence,
+    vatPence: row.vatPence,
+    totalPence: row.totalPence,
+    status,
+    expiresAt: row.expiresAt.toISOString(),
+  })
 })
 
 /**
