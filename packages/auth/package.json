@@ -1,0 +1,22 @@
+{
+  "name": "@dogfood/auth",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "auth:generate": "npx @better-auth/cli@latest generate --config ./src/index.ts --output ./better-auth-schema.sql -y",
+    "auth:migrate": "npx @better-auth/cli@latest migrate --config ./src/index.ts -y",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-auth": "^1.7.4",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.3"
+  }
+}

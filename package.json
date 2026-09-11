@@ -1,0 +1,26 @@
+{
+  "name": "dogfood-platform",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Dog Food Ecommerce/CRM platform — monorepo (storefront, Payload CRM, iii.dev workers, shared packages).",
+  "type": "module",
+  "packageManager": "pnpm@10.33.3",
+  "engines": {
+    "node": ">=20.9.0",
+    "pnpm": ">=10"
+  },
+  "scripts": {
+    "dev:crm": "pnpm --filter payload-crm dev",
+    "dev:storefront": "pnpm --filter storefront dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r --if-present lint",
+    "typecheck": "pnpm -r --if-present typecheck",
+    "db:commerce:generate": "pnpm --filter @dogfood/commerce-db generate",
+    "db:commerce:migrate": "pnpm --filter @dogfood/commerce-db migrate",
+    "crm:migrate": "pnpm --filter payload-crm payload migrate"
+  },
+  "devDependencies": {
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3"
+  }
+}

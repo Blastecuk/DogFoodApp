@@ -1,0 +1,108 @@
+import { sql } from 'drizzle-orm'
+import {
+  boolean,
+  integer,
+  jsonb,
+  pgSchema,
+  text,
+  timestamp,
+  uniqueIndex,
+} from 'drizzle-orm/pg-core'
+
+/**
+ * Commerce tables owned exclusively by iii.dev and managed by Drizzle Kit.
+ * These live in the `commerce` schema of commerce_db. Better Auth owns its own
+ * tables (customer identity) separately. Payload has no access to this database.
+ *
+ * This is a starting subset of the architecture spec §10 core tables; further
+ * tables (subscriptions, shipments, promotions, redemptions, inbox, CRM cases)
+ * are added in later phases.
+ */
+export const commerce = pgSchema('commerce')
+
+/** Accepted commerce read model — the source of truth for checkout price/VAT/active. */
+export const catalogSkus = commerce.table(
+  'catalog_skus',
+  {
+    id: text('id').primaryKey(),
+    productSlug: text('product_slug').notNull(),
+    variantLabel: text('variant_label').notNull(),
+    supplierSku: text('supplier_sku'),
+    pricePence: integer('price_pence').notNull(),
+    vatRateBps: integer('vat_rate_bps').notNull().default(2000),
+    active: boolean('active').notNull().default(true),
+    catalogVersion: integer('catalog_version').notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('catalog_skus_slug_variant_uq').on(t.productSlug, t.variantLabel)],
+)
+
+export const carts = commerce.table('carts', {
+  id: text('id').primaryKey(),
+  customerId: text('customer_id'),
+  status: text('status').notNull().default('open'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const cartItems = commerce.table('cart_items', {
+  id: text('id').primaryKey(),
+  cartId: text('cart_id')
+    .notNull()
+    .references(() => carts.id, { onDelete: 'cascade' }),
+  skuId: text('sku_id')
+    .notNull()
+    .references(() => catalogSkus.id),
+  quantity: integer('quantity').notNull().default(1),
+})
+
+export const orders = commerce.table('orders', {
+  id: text('id').primaryKey(),
+  customerId: text('customer_id').notNull(),
+  status: text('status').notNull().default('pending'),
+  paymentStatus: text('payment_status').notNull().default('unpaid'),
+  fulfilmentStatus: text('fulfilment_status').notNull().default('none'),
+  totalPence: integer('total_pence').notNull(),
+  currency: text('currency').notNull().default('GBP'),
+  stripeCheckoutSessionId: text('stripe_checkout_session_id'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+export const orderItems = commerce.table('order_items', {
+  id: text('id').primaryKey(),
+  orderId: text('order_id')
+    .notNull()
+    .references(() => orders.id, { onDelete: 'cascade' }),
+  skuId: text('sku_id').notNull(),
+  description: text('description').notNull(),
+  quantity: integer('quantity').notNull(),
+  unitPricePence: integer('unit_price_pence').notNull(),
+})
+
+/** Transactional outbox — paid-order state and event are committed atomically. */
+export const outboxEvents = commerce.table(
+  'outbox_events',
+  {
+    id: text('id').primaryKey(),
+    eventType: text('event_type').notNull(),
+    idempotencyKey: text('idempotency_key').notNull(),
+    correlationId: text('correlation_id').notNull(),
+    payload: jsonb('payload').notNull(),
+    status: text('status').notNull().default('pending'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    publishedAt: timestamp('published_at', { withTimezone: true }),
+  },
+  (t) => [uniqueIndex('outbox_idempotency_uq').on(t.idempotencyKey)],
+)
+
+export const schema = {
+  catalogSkus,
+  carts,
+  cartItems,
+  orders,
+  orderItems,
+  outboxEvents,
+}
+
+export { sql }

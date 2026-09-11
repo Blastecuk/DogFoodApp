@@ -1,0 +1,20 @@
+{
+  "name": "DogFood Platform (monorepo)",
+  "install": "pnpm install --frozen-lockfile",
+  "terminals": [
+    {
+      "name": "payload-crm",
+      "command": "pnpm --filter payload-crm dev",
+      "description": "Payload CMS + staff CRM (Vercel project B) on http://localhost:3000/admin"
+    },
+    {
+      "name": "storefront",
+      "command": "pnpm --filter storefront dev",
+      "description": "Next.js storefront + Better Auth (Vercel project A) on http://localhost:3001"
+    }
+  ],
+  "ports": [
+    { "name": "payload-crm", "port": 3000 },
+    { "name": "storefront", "port": 3001 }
+  ]
+}

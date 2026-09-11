@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "sprites": {
+      "url": "https://sprites.dev/mcp",
+      "headers": {
+        "Fly-Client-Interactive": "false",
+        "Fly-Client-Agent": "cursor"
+      }
+    }
+  }
+}
