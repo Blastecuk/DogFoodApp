@@ -203,6 +203,12 @@ importers:
         specifier: ^5.7.3
         version: 5.7.3
 
+  packages/manufacturer-adapter:
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.7.3
+
   workers/api:
     dependencies:
       '@dogfood/commerce-db':
@@ -223,6 +229,28 @@ importers:
       stripe:
         specifier: ^22.6.0
         version: 22.6.2(@types/node@22.19.9)
+    devDependencies:
+      '@types/node':
+        specifier: ^22
+        version: 22.19.9
+      dotenv:
+        specifier: ^16.4.7
+        version: 16.4.7
+      tsx:
+        specifier: ^4.19.2
+        version: 4.22.4
+      typescript:
+        specifier: ^5.7.3
+        version: 5.7.3
+
+  workers/manufacturer:
+    dependencies:
+      '@dogfood/commerce-db':
+        specifier: workspace:*
+        version: link:../../packages/commerce-db
+      '@dogfood/manufacturer-adapter':
+        specifier: workspace:*
+        version: link:../../packages/manufacturer-adapter
     devDependencies:
       '@types/node':
         specifier: ^22

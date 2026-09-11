@@ -1,0 +1,23 @@
+{
+  "name": "manufacturer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "iii.dev manufacturer consumer — submits paid orders to the manufacturer adapter (Fly.io process group: worker). Fake adapter in the prototype.",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "drain": "tsx src/index.ts --once",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dogfood/commerce-db": "workspace:*",
+    "@dogfood/manufacturer-adapter": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "dotenv": "^16.4.7",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

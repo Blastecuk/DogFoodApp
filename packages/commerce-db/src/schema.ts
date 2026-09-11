@@ -133,6 +133,26 @@ export const promotionRedemptions = commerce.table('promotion_redemptions', {
 })
 
 /**
+ * Manufacturer works orders. One per commerce order (idempotency key = order id),
+ * so re-submitting a paid order never creates a duplicate works order. The
+ * manufacturer owns picking/packing/dispatch; we only record its reference/state.
+ */
+export const manufacturerWorksOrders = commerce.table('manufacturer_works_orders', {
+  id: text('id').primaryKey(),
+  orderId: text('order_id')
+    .notNull()
+    .references(() => orders.id, { onDelete: 'cascade' })
+    .unique(),
+  idempotencyKey: text('idempotency_key').notNull().unique(),
+  status: text('status').notNull().default('pending'), // pending | accepted | rejected
+  manufacturerRef: text('manufacturer_ref'),
+  attempts: integer('attempts').notNull().default(0),
+  lastError: text('last_error'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+})
+
+/**
  * Provider webhook dedupe log. A webhook is only processed once; the primary key
  * is the provider event id, so a replayed/duplicated webhook is a no-op.
  */
@@ -169,6 +189,7 @@ export const schema = {
   pricingQuotes,
   promotions,
   promotionRedemptions,
+  manufacturerWorksOrders,
   webhookEvents,
   outboxEvents,
 }
