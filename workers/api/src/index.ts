@@ -1,7 +1,7 @@
 import 'dotenv/config'
 import { serve } from '@hono/node-server'
 import { and, eq, inArray } from 'drizzle-orm'
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import Stripe from 'stripe'
 import { FakeTrackingAdapter, STATUS_RANK, type TrackingStatus } from '@dogfood/tracking-adapter'
 import { db, pool, schema } from '@dogfood/commerce-db'
@@ -104,6 +104,146 @@ app.post('/webhooks/tracking/:carrier', async (c) => {
   } finally {
     client.release()
   }
+})
+
+// --- Staff (/ops) authorization -------------------------------------------
+// Short-lived staff token minted by the Payload BFF. Compact HMAC token:
+//   base64url(claims) + "." + hex(hmac_sha256(secret, base64url(claims)))
+// Production uses asymmetric keys (III_STAFF_TOKEN_VERIFY_PUBLIC_KEY); the
+// prototype uses a shared secret. Fly re-authorises the token + role here.
+const staffTokenSecret = process.env.III_STAFF_TOKEN_SECRET ?? 'unset-staff-secret'
+const staffAudience = process.env.III_STAFF_TOKEN_AUDIENCE ?? 'iii-ops-api'
+
+type StaffClaims = { sub: string; role: string; aud: string; exp: number; iss?: string; correlationId?: string }
+
+function verifyStaffToken(authHeader: string | undefined): StaffClaims | null {
+  if (!authHeader?.startsWith('Bearer ')) return null
+  const token = authHeader.slice(7)
+  const [part, sig] = token.split('.')
+  if (!part || !sig) return null
+  if (!verifyBody(staffTokenSecret, part, sig)) return null
+  let claims: StaffClaims
+  try {
+    claims = JSON.parse(Buffer.from(part, 'base64url').toString('utf8'))
+  } catch {
+    return null
+  }
+  if (claims.aud !== staffAudience) return null
+  if (typeof claims.exp !== 'number' || claims.exp * 1000 < Date.now()) return null
+  if (claims.role !== 'superadmin' && claims.role !== 'admin') return null
+  return claims
+}
+
+/** Guard: returns claims or writes a 401 JSON response. */
+function requireStaff(c: Context): StaffClaims | Response {
+  const claims = verifyStaffToken(c.req.header('authorization'))
+  if (!claims) return c.json({ error: 'unauthorized' }, 401)
+  return claims
+}
+
+async function orderDetail(id: string) {
+  const [order] = await db.select().from(schema.orders).where(eq(schema.orders.id, id)).limit(1)
+  if (!order) return null
+  const items = await db.select().from(schema.orderItems).where(eq(schema.orderItems.orderId, id))
+  const [wo] = await db
+    .select()
+    .from(schema.manufacturerWorksOrders)
+    .where(eq(schema.manufacturerWorksOrders.orderId, id))
+    .limit(1)
+  const ships = await db.select().from(schema.shipments).where(eq(schema.shipments.orderId, id))
+  const shipmentViews = []
+  for (const s of ships) {
+    const events = await db
+      .select()
+      .from(schema.trackingEvents)
+      .where(eq(schema.trackingEvents.shipmentId, s.id))
+    shipmentViews.push({
+      carrierCode: s.carrierCode,
+      trackingNumber: s.trackingNumber,
+      status: s.status,
+      events: events
+        .map((e) => ({ status: e.status, occurredAt: e.occurredAt }))
+        .sort((a, b) => a.occurredAt.getTime() - b.occurredAt.getTime()),
+    })
+  }
+  const cases = await db
+    .select()
+    .from(schema.operationalCases)
+    .where(eq(schema.operationalCases.orderId, id))
+  return { order, items, worksOrder: wo ?? null, shipments: shipmentViews, cases }
+}
+
+/** Staff order search/list (protected /ops; not ownership-scoped). */
+app.get('/ops/orders', async (c) => {
+  const staff = requireStaff(c)
+  if (staff instanceof Response) return staff
+  const rows = await db.select().from(schema.orders).orderBy(schema.orders.createdAt)
+  return c.json({
+    orders: rows.map((o) => ({
+      id: o.id,
+      customerId: o.customerId,
+      paymentStatus: o.paymentStatus,
+      fulfilmentStatus: o.fulfilmentStatus,
+      totalPence: o.totalPence,
+      createdAt: o.createdAt,
+    })),
+  })
+})
+
+/** Staff order detail — the SAME committed state the customer sees, plus ops data. */
+app.get('/ops/orders/:id', async (c) => {
+  const staff = requireStaff(c)
+  if (staff instanceof Response) return staff
+  const detail = await orderDetail(c.req.param('id'))
+  if (!detail) return c.json({ error: 'not_found' }, 404)
+  const { order, items, worksOrder, shipments, cases } = detail
+  return c.json({
+    id: order.id,
+    customerId: order.customerId,
+    paymentStatus: order.paymentStatus,
+    fulfilmentStatus: order.fulfilmentStatus,
+    totalPence: order.totalPence,
+    currency: order.currency,
+    items: items.map((i) => ({ description: i.description, quantity: i.quantity, unitPricePence: i.unitPricePence })),
+    worksOrder: worksOrder
+      ? { status: worksOrder.status, manufacturerRef: worksOrder.manufacturerRef, attempts: worksOrder.attempts }
+      : null,
+    shipments,
+    cases: cases.map((k) => ({ id: k.id, kind: k.kind, detail: k.detail, status: k.status, createdAt: k.createdAt })),
+  })
+})
+
+/** Open operational cases across all orders. */
+app.get('/ops/cases', async (c) => {
+  const staff = requireStaff(c)
+  if (staff instanceof Response) return staff
+  const rows = await db
+    .select()
+    .from(schema.operationalCases)
+    .where(eq(schema.operationalCases.status, 'open'))
+  return c.json({ cases: rows })
+})
+
+/** Record a staff operational note/case against an order (audited in Neon). */
+app.post('/ops/orders/:id/cases', async (c) => {
+  const staff = requireStaff(c)
+  if (staff instanceof Response) return staff
+  const id = c.req.param('id')
+  const body = (await c.req.json().catch(() => ({}))) as { detail?: string; kind?: string }
+  const detail = String(body.detail ?? '').trim()
+  if (!detail) return c.json({ error: 'detail_required' }, 400)
+  const [order] = await db.select().from(schema.orders).where(eq(schema.orders.id, id)).limit(1)
+  if (!order) return c.json({ error: 'order_not_found' }, 404)
+  const caseId = newId('evt')
+  await db.insert(schema.operationalCases).values({
+    id: caseId,
+    orderId: id,
+    kind: body.kind ?? 'staff_note',
+    // Audit the acting staff member (from the verified token, not the browser).
+    detail: `${detail} — by ${staff.role} ${staff.sub}`,
+    status: 'open',
+  })
+  return c.json({ ok: true, caseId }, 201)
 })
 
 /** Customer order list (ownership-scoped; called by the storefront BFF). */
